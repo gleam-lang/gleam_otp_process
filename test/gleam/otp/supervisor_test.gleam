@@ -43,17 +43,22 @@ pub fn supervisor_test() {
   |> should.be_ok
 
   // Assert children have started
-  let assert Ok(#(1, p)) = process.receive(subject, 10)
-  let assert Ok(#(2, _)) = process.receive(subject, 10)
-  let assert Ok(#(3, _)) = process.receive(subject, 10)
+  let assert Ok(#(1, pid1)) = process.receive(subject, 10)
+  let assert Ok(#(2, pid2)) = process.receive(subject, 10)
+  let assert Ok(#(3, pid3)) = process.receive(subject, 10)
   let assert Error(Nil) = process.receive(subject, 10)
 
   // Kill first child an assert they all restart
-  process.kill(p)
+  process.kill(pid1)
   let assert Ok(#(1, p1)) = process.receive(subject, 10)
   let assert Ok(#(2, p2)) = process.receive(subject, 10)
   let assert Ok(#(3, _)) = process.receive(subject, 10)
   let assert Error(Nil) = process.receive(subject, 10)
+
+  // Ensure that the original processes are dead
+  should.be_false(process.is_alive(pid1))
+  should.be_false(process.is_alive(pid2))
+  should.be_false(process.is_alive(pid3))
 
   // Kill second child an assert the following children restart
   process.kill(p2)
