@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Fixed a bug where using `actor.Stop(process.Abnormal(...))` would stop
-  the process with `Normal`.
+- Fixed a bug where using `actor.Stop()` with other reasons than `Normal`
+  would stop the process with `Normal`.
 
 ## v0.15.0 - 2024-12-08
 
