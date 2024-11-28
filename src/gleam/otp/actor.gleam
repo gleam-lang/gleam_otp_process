@@ -257,6 +257,11 @@ pub type Spec(state, msg) {
 
 // TODO: Check needed functionality here to be OTP compatible
 fn exit_process(reason: ExitReason) -> ExitReason {
+  case reason {
+    Abnormal(reason) -> process.send_abnormal_exit(process.self(), reason)
+    _ -> Nil
+  }
+
   // TODO
   reason
 }
@@ -407,7 +412,7 @@ fn initialise_actor(
     // The init failed. Exit with an error.
     Failed(reason) -> {
       process.send(ack, Error(Abnormal(reason)))
-      exit_process(Abnormal(reason))
+      exit_process(process.Normal)
     }
   }
 }

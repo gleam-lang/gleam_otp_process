@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed a bug where using `actor.Stop(process.Abnormal(...))` would stop
+  the process with `Normal`.
+
 ## v0.15.0 - 2024-12-08
 
 - The deprecated `try_await_forever` function in the `gleam/otp/task` module has
