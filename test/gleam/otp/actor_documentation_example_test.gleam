@@ -77,7 +77,7 @@ fn handle_message(
   case message {
     // For the `Shutdown` message we return the `actor.Stop` value, which causes
     // the actor to discard any remaining messages and stop.
-    Shutdown -> actor.Stop(process.Normal)
+    Shutdown -> actor.Stop
 
     // For the `Push` message we add the new element to the stack and return
     // `actor.Continue` with this new stack, causing the actor to process any

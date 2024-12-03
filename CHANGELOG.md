@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed a bug where using `actor.Stop()` with other reasons than `Normal`
+  would stop the process with `Normal`.
+
 ## v0.14.1 - 2024-11-15
 
 - Fixed a bug where the `significant` parameter would not be passed to the

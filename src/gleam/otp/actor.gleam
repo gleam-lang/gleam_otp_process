@@ -139,7 +139,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
 import gleam/erlang/charlist.{type Charlist}
 import gleam/erlang/process.{
-  type ExitReason, type Pid, type Selector, type Subject, Abnormal,
+  type ExitReason, type Pid, type Selector, type Subject, Abnormal, Killed,
 }
 import gleam/option.{type Option, None, Some}
 import gleam/otp/system.{
@@ -172,7 +172,11 @@ pub type Next(message, state) {
 
   /// Stop handling messages and shut down.
   ///
-  Stop(ExitReason)
+  Stop
+
+  /// Stop handling messages with an abnormal reason.
+  ///
+  StopAbnormal(reason: String)
 }
 
 pub fn continue(state: state) -> Next(message, state) {
@@ -255,12 +259,6 @@ pub type Spec(state, msg) {
   )
 }
 
-// TODO: Check needed functionality here to be OTP compatible
-fn exit_process(reason: ExitReason) -> ExitReason {
-  // TODO
-  reason
-}
-
 fn receive_message(self: Self(state, msg)) -> Message(msg) {
   let selector = case self.mode {
     // When suspended we only respond to system messages
@@ -315,7 +313,7 @@ fn process_status_info(self: Self(state, msg)) -> StatusInfo {
   )
 }
 
-fn loop(self: Self(state, msg)) -> ExitReason {
+fn loop(self: Self(state, msg)) -> Nil {
   case receive_message(self) {
     // An OTP system message. This is handled by the actor for the programmer,
     // behind the scenes.
@@ -353,7 +351,10 @@ fn loop(self: Self(state, msg)) -> ExitReason {
     // subject or some other messsage that the programmer's selector expects.
     Message(msg) ->
       case self.message_handler(msg, self.state) {
-        Stop(reason) -> exit_process(reason)
+        Stop -> Nil
+
+        StopAbnormal(reason) ->
+          process.send_abnormal_exit(process.self(), reason)
 
         Continue(state: state, selector: new_selector) -> {
           let selector =
@@ -374,7 +375,7 @@ fn log_warning(a: Charlist, b: List(Charlist)) -> Nil
 fn initialise_actor(
   spec: Spec(state, msg),
   ack: Subject(Result(Subject(msg), ExitReason)),
-) -> ExitReason {
+) -> Nil {
   // This is the main subject for the actor, the one that the actor.start
   // functions return.
   // Once the actor has been initialised this will be sent to the parent for
@@ -404,10 +405,9 @@ fn initialise_actor(
       loop(self)
     }
 
-    // The init failed. Exit with an error.
+    // The init failed. Send the reason back to the parent, but exit normally.
     Failed(reason) -> {
-      process.send(ack, Error(Abnormal(reason)))
-      exit_process(Abnormal(reason))
+      process.send(ack, Error(Abnormal(dynamic.from(reason))))
     }
   }
 }
@@ -421,7 +421,7 @@ fn init_selector(subject, selector) {
 pub type StartError {
   InitTimeout
   InitFailed(ExitReason)
-  InitCrashed(Dynamic)
+  InitCrashed(ExitReason)
 }
 
 /// The result of starting a Gleam actor.

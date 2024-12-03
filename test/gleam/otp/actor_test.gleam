@@ -205,6 +205,52 @@ pub fn replace_selector_test() {
   |> should.equal(dynamic.from("unknown message: String"))
 }
 
+pub fn abnormal_exit_can_be_trapped_test() {
+  process.trap_exits(True)
+  let exits =
+    process.new_selector()
+    |> process.selecting_trapped_exits(function.identity)
+
+  // Make an actor exit with an abnormal reason
+  let assert Ok(subject) =
+    actor.start(Nil, fn(_, _) { actor.StopAbnormal("reason") })
+  process.send(subject, Nil)
+
+  let trapped_reason = process.select(exits, 10)
+
+  // Stop trapping exits, as otherwise other tests fail
+  process.trap_exits(False)
+
+  trapped_reason
+  |> should.equal(
+    Ok(process.ExitMessage(
+      process.subject_owner(subject),
+      process.Abnormal(dynamic.from("reason")),
+    )),
+  )
+}
+
+pub fn killed_exit_can_be_trapped_test() {
+  process.trap_exits(True)
+  let exits =
+    process.new_selector()
+    |> process.selecting_trapped_exits(function.identity)
+
+  // Make an actor exit with a killed reason
+  let assert Ok(subject) = actor.start(Nil, fn(_, _) { actor.continue(Nil) })
+  process.kill(process.subject_owner(subject))
+
+  let trapped_reason = process.select(exits, 10)
+
+  // Stop trapping exits, as otherwise other tests fail
+  process.trap_exits(False)
+
+  trapped_reason
+  |> should.equal(
+    Ok(process.ExitMessage(process.subject_owner(subject), process.Killed)),
+  )
+}
+
 fn mapped_selector(mapper: fn(a) -> ActorMessage) {
   let subject = process.new_subject()
 

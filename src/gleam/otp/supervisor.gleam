@@ -336,9 +336,9 @@ fn handle_exit(pid: Pid, state: State(a)) -> actor.Next(Message, State(a)) {
       actor.continue(state)
     }
     Error(TooManyRestarts) ->
-      actor.Stop(process.Abnormal(
+      actor.StopAbnormal(
         "Child processes restarted too many times within allowed period",
-      ))
+      )
   }
 }
 
