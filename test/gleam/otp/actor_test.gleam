@@ -221,11 +221,12 @@ pub fn abnormal_exit_can_be_trapped_test() {
   // Stop trapping exits, as otherwise other tests fail
   process.trap_exits(False)
 
+  // The weird reason below is because of https://github.com/gleam-lang/erlang/issues/66
   trapped_reason
   |> should.equal(
     Ok(process.ExitMessage(
       process.subject_owner(subject),
-      process.Abnormal("reason"),
+      process.Abnormal("Abnormal(\"reason\")"),
     )),
   )
 }
