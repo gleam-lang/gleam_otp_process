@@ -139,7 +139,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
 import gleam/erlang/charlist.{type Charlist}
 import gleam/erlang/process.{
-  type ExitReason, type Pid, type Selector, type Subject, Abnormal,
+  type ExitReason, type Pid, type Selector, type Subject, Abnormal, Killed,
 }
 import gleam/option.{type Option, None, Some}
 import gleam/otp/system.{
@@ -189,7 +189,7 @@ pub fn with_selector(
 ) -> Next(message, state) {
   case value {
     Continue(state, _) -> Continue(state, Some(selector))
-    _ -> value
+    Stop(_) -> value
   }
 }
 
@@ -257,7 +257,12 @@ pub type Spec(state, msg) {
 
 // TODO: Check needed functionality here to be OTP compatible
 fn exit_process(reason: ExitReason) -> ExitReason {
-  // TODO
+  case reason {
+    Abnormal(reason) -> process.send_abnormal_exit(process.self(), reason)
+    Killed -> process.kill(process.self())
+    _ -> Nil
+  }
+
   reason
 }
 
@@ -404,10 +409,10 @@ fn initialise_actor(
       loop(self)
     }
 
-    // The init failed. Exit with an error.
+    // The init failed. Send the reason back to the parent, but exit normally.
     Failed(reason) -> {
       process.send(ack, Error(Abnormal(reason)))
-      exit_process(Abnormal(reason))
+      exit_process(process.Normal)
     }
   }
 }
