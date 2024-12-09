@@ -189,7 +189,7 @@ pub fn with_selector(
 ) -> Next(message, state) {
   case value {
     Continue(state, _) -> Continue(state, Some(selector))
-    _ -> value
+    Stop(_) -> value
   }
 }
 
