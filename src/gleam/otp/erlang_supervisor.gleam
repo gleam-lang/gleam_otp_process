@@ -25,6 +25,10 @@ import gleam/erlang/process.{type Pid}
 import gleam/list
 import gleam/result
 
+pub opaque type Supervisor(kind) {
+  Supervisor(pid: Pid)
+}
+
 pub type Strategy {
   /// If one child process terminates and is to be restarted, only that child
   /// process is affected. This is the default restart strategy.
@@ -39,6 +43,8 @@ pub type Strategy {
   /// process in the start order) are terminated. Then the terminated child
   /// process and all child processes after it are restarted.
   RestForOne
+
+  SimpleOneForOne
 }
 
 /// A supervisor can be configured to automatically shut itself down with exit
@@ -61,24 +67,41 @@ pub type AutoShutdown {
   AllSignificant
 }
 
-pub opaque type Builder {
+pub opaque type Builder(kind) {
   Builder(
-    strategy: Strategy,
     intensity: Int,
     period: Int,
     auto_shutdown: AutoShutdown,
+    strategy: Strategy,
     children: List(ChildBuilder),
   )
 }
 
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
-pub fn new(strategy strategy: Strategy) -> Builder {
+pub type Simple
+
+pub type Classic
+
+const default_restart_intensity = 2
+
+const default_restart_period = 5
+
+pub fn new(strategy strategy: Strategy) -> Builder(Classic) {
   Builder(
     strategy: strategy,
-    intensity: 2,
-    period: 5,
+    intensity: default_restart_intensity,
+    period: default_restart_period,
     auto_shutdown: Never,
     children: [],
+  )
+}
+
+pub fn simple_new(child: ChildBuilder) -> Builder(Simple) {
+  Builder(
+    strategy: SimpleOneForOne,
+    intensity: default_restart_intensity,
+    period: default_restart_period,
+    auto_shutdown: Never,
+    children: [child],
   )
 }
 
@@ -91,20 +114,21 @@ pub fn new(strategy strategy: Strategy) -> Builder {
 /// termination reason for the supervisor itself in that case will be
 /// shutdown. 
 ///
-/// Intensity defaults to 1 and period defaults to 5.
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
+/// Intensity defaults to 2 and period defaults to 5.
 pub fn restart_tolerance(
-  builder: Builder,
+  builder: Builder(either),
   intensity intensity: Int,
   period period: Int,
-) -> Builder {
+) -> Builder(either) {
   Builder(..builder, intensity: intensity, period: period)
 }
 
 /// A supervisor can be configured to automatically shut itself down with
 /// exit reason shutdown when significant children terminate.
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
-pub fn auto_shutdown(builder: Builder, value: AutoShutdown) -> Builder {
+pub fn auto_shutdown(
+  builder: Builder(either),
+  value: AutoShutdown,
+) -> Builder(either) {
   Builder(..builder, auto_shutdown: value)
 }
 
@@ -123,7 +147,7 @@ pub type Restart {
 }
 
 pub type ChildType {
-  Worker(
+  WorkerChild(
     /// The number of milliseconds the child is given to shut down. The
     /// supervisor tells the child process to terminate by calling
     /// `exit(Child,shutdown)` and then wait for an exit signal with reason
@@ -132,7 +156,7 @@ pub type ChildType {
     /// unconditionally terminated using `exit(Child,kill)`.
     shutdown_ms: Int,
   )
-  Supervisor
+  SupervisorChild
 }
 
 pub opaque type ChildBuilder {
@@ -165,8 +189,14 @@ pub opaque type ChildBuilder {
   )
 }
 
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
-pub fn start_link(builder: Builder) -> Result(Pid, Dynamic) {
+pub type LinkStartError {
+  ErlangError(Dynamic)
+  SimpleOneForOneMultipleChildrenError
+}
+
+pub fn start_link(
+  builder: Builder(either),
+) -> Result(Supervisor(either), LinkStartError) {
   let flags =
     dict.new()
     |> property("strategy", builder.strategy)
@@ -174,20 +204,129 @@ pub fn start_link(builder: Builder) -> Result(Pid, Dynamic) {
     |> property("period", builder.period)
     |> property("auto_shutdown", builder.auto_shutdown)
 
-  let children = builder.children |> list.reverse |> list.map(convert_child)
+  let children =
+    builder.children |> list.reverse |> list.map(child_builder_to_erlang)
 
-  erlang_start_link(#(flags, children))
+  use supervisor_pid <- result.map(
+    erlang_start_link(#(flags, children))
+    |> result.map_error(fn(erlang_error) { ErlangError(erlang_error) }),
+  )
+  Supervisor(supervisor_pid)
 }
 
-@external(erlang, "gleam_otp_external", "static_supervisor_start_link")
-fn erlang_start_link(
-  args: #(Dict(Atom, Dynamic), List(Dict(Atom, Dynamic))),
-) -> Result(Pid, Dynamic)
+pub fn get_pid(supervisor: Supervisor(either)) -> Pid {
+  supervisor.pid
+}
+
+pub fn start_child(
+  supervisor: Supervisor(Classic),
+  child_builder: ChildBuilder,
+) -> Result(Pid, SupervisorError) {
+  erlang_start_child(
+    supervisor.pid,
+    child_builder |> child_builder_to_erlang |> dynamic.from,
+  )
+}
+
+pub fn simple_start_child(
+  supervisor: Supervisor(Simple),
+  args: List(Dynamic),
+) -> Result(Pid, SupervisorError) {
+  erlang_start_child(supervisor.pid, args |> dynamic.from)
+}
+
+pub type SupervisorError {
+  AlreadyPresent
+  AlreadyStart(Dynamic)
+  SupervisorNotSimpleOneForOne
+  SimpleOneForOneForbidden
+  ChildNotFound
+  ChildRunning
+  ChildRestarting
+  UnknownError(details: String)
+}
+
+pub fn delete_child(
+  supervisor: Supervisor(Classic),
+  id: String,
+) -> Result(Nil, SupervisorError) {
+  let deletion_result = erlang_delete_child(supervisor.pid, id |> dynamic.from)
+  case deletion_result |> atom.from_dynamic {
+    Error(_) -> Error(UnknownError("deletion failed"))
+    Ok(_) -> Ok(Nil)
+  }
+}
+
+pub fn restart_child(
+  supervisor: Supervisor(Classic),
+  id: String,
+) -> Result(Pid, SupervisorError) {
+  erlang_restart_child(supervisor.pid, id |> dynamic.from)
+  |> result.map_error(fn(e) {
+    case atom.from_dynamic(e) {
+      Error(_) ->
+        UnknownError(
+          "failed to parse erlang's supervisor:restart_child/2 return to an atomic",
+        )
+      Ok(err_msg) ->
+        case atom.to_string(err_msg) {
+          "running" -> ChildRunning
+          "restarting" -> ChildRestarting
+          "not_found" -> ChildNotFound
+          "simple_one_for_one" ->
+            panic as "simple-one-for-one supervisors should already have been caught"
+          other -> UnknownError(other)
+        }
+    }
+  })
+}
+
+pub fn terminate_child(
+  supervisor: Supervisor(Classic),
+  id: String,
+) -> Result(Nil, SupervisorError) {
+  let termination_result =
+    erlang_terminate_child(supervisor.pid, id |> dynamic.from)
+
+  case
+    termination_result
+    |> atom.from_dynamic
+  {
+    Error(_) -> Error(ChildNotFound)
+    Ok(_) -> Ok(Nil)
+  }
+}
+
+pub fn simple_terminate_child(
+  supervisor: Supervisor(Simple),
+  child: Pid,
+) -> Result(Nil, SupervisorError) {
+  let termination_result =
+    erlang_terminate_child(supervisor.pid, child |> dynamic.from)
+
+  case
+    termination_result
+    |> atom.from_dynamic
+  {
+    Error(_) -> Error(ChildNotFound)
+    Ok(_) -> Ok(Nil)
+  }
+}
 
 /// Add a child to the supervisor.
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
-pub fn add(builder: Builder, child: ChildBuilder) -> Builder {
+pub fn add(builder: Builder(Classic), child: ChildBuilder) -> Builder(Classic) {
   Builder(..builder, children: [child, ..builder.children])
+}
+
+pub type Property {
+  Specs(count: Int)
+  Active(count: Int)
+  Supervisors(count: Int)
+  Workers(count: Int)
+}
+
+pub fn count_children(supervisor: Supervisor(either)) -> List(Property) {
+  erlang_count_children(supervisor.pid)
 }
 
 /// A regular child that is not also a supervisor.
@@ -199,7 +338,6 @@ pub fn add(builder: Builder, child: ChildBuilder) -> Builder {
 /// backward compatibility, some occurences of "name" can still be found, for
 /// example in error messages.
 ///
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
 pub fn worker_child(
   id id: String,
   run starter: fn() -> Result(Pid, whatever),
@@ -209,7 +347,7 @@ pub fn worker_child(
     starter: fn() { starter() |> result.map_error(dynamic.from) },
     restart: Permanent,
     significant: False,
-    child_type: Worker(5000),
+    child_type: WorkerChild(5000),
   )
 }
 
@@ -222,17 +360,22 @@ pub fn worker_child(
 /// backward compatibility, some occurences of "name" can still be found, for
 /// example in error messages.
 ///
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
 pub fn supervisor_child(
+  builder builder: Builder(either),
   id id: String,
-  run starter: fn() -> Result(Pid, whatever),
+  on_started starter: fn(Supervisor(either)) -> Nil,
 ) -> ChildBuilder {
+  let starter: fn() -> Result(Pid, LinkStartError) = fn() {
+    use sup <- result.map(start_link(builder))
+    starter(sup)
+    sup.pid
+  }
   ChildBuilder(
     id: id,
     starter: fn() { starter() |> result.map_error(dynamic.from) },
     restart: Permanent,
     significant: False,
-    child_type: Supervisor,
+    child_type: SupervisorChild,
   )
 }
 
@@ -245,7 +388,6 @@ pub fn supervisor_child(
 /// which is the default.
 ///
 /// The default value for significance is `False`.
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
 pub fn significant(child: ChildBuilder, significant: Bool) -> ChildBuilder {
   ChildBuilder(..child, significant: significant)
 }
@@ -257,10 +399,9 @@ pub fn significant(child: ChildBuilder, significant: Bool) -> ChildBuilder {
 ///
 /// This will be ignored if the child is a supervisor itself.
 ///
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
 pub fn timeout(child: ChildBuilder, ms ms: Int) -> ChildBuilder {
   case child.child_type {
-    Worker(_) -> ChildBuilder(..child, child_type: Worker(ms))
+    WorkerChild(_) -> ChildBuilder(..child, child_type: WorkerChild(ms))
     _ -> child
   }
 }
@@ -269,12 +410,11 @@ pub fn timeout(child: ChildBuilder, ms ms: Int) -> ChildBuilder {
 /// more.
 ///
 /// The default value for restart is `Permanent`.
-@deprecated("static_supervisor module is deprecated, use gleam/otp/erlang_supervisor instead")
 pub fn restart(child: ChildBuilder, restart: Restart) -> ChildBuilder {
   ChildBuilder(..child, restart: restart)
 }
 
-fn convert_child(child: ChildBuilder) -> Dict(Atom, Dynamic) {
+fn child_builder_to_erlang(child: ChildBuilder) -> Dict(Atom, Dynamic) {
   let mfa = #(
     atom.create_from_string("erlang"),
     atom.create_from_string("apply"),
@@ -282,11 +422,11 @@ fn convert_child(child: ChildBuilder) -> Dict(Atom, Dynamic) {
   )
 
   let #(type_, shutdown) = case child.child_type {
-    Supervisor -> #(
+    SupervisorChild -> #(
       atom.create_from_string("supervisor"),
       dynamic.from(atom.create_from_string("infinity")),
     )
-    Worker(timeout) -> #(
+    WorkerChild(timeout) -> #(
       atom.create_from_string("worker"),
       dynamic.from(timeout),
     )
@@ -314,3 +454,32 @@ fn property(
 pub fn init(start_data: Dynamic) -> Result(Dynamic, never) {
   Ok(start_data)
 }
+
+// Erlang bindings
+
+@external(erlang, "supervisor", "start_child")
+fn erlang_start_child(
+  supervisor: Pid,
+  child_spec_or_extra_args: Dynamic,
+) -> Result(Pid, SupervisorError)
+
+@external(erlang, "gleam_otp_external", "erlang_supervisor_start_link")
+fn erlang_start_link(
+  args: #(Dict(Atom, Dynamic), List(Dict(Atom, Dynamic))),
+) -> Result(Pid, Dynamic)
+
+// This should definitely not be returning a dynamic, but the actual
+// return type is really annoying (it's an "ok" atom without a record)
+// https://www.erlang.org/doc/apps/stdlib/supervisor.html#terminate_child/2
+@external(erlang, "supervisor", "terminate_child")
+fn erlang_terminate_child(supervisor: Pid, id_or_pid: Dynamic) -> Dynamic
+
+// The return type could be improved
+@external(erlang, "supervisor", "restart_child")
+fn erlang_restart_child(supervisor: Pid, id: Dynamic) -> Result(Pid, Dynamic)
+
+@external(erlang, "supervisor", "delete_child")
+fn erlang_delete_child(supervisor: Pid, id: Dynamic) -> Dynamic
+
+@external(erlang, "supervisor", "count_children")
+fn erlang_count_children(sup_ref: Pid) -> List(Property)
